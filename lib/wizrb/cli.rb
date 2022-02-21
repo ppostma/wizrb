@@ -24,6 +24,18 @@ module Wizrb
       stop(scene)
     end
 
+    desc 'discover', 'Search for lights'
+    def discover
+      group = find_lights
+      group.each do |light|
+        say("#{light.class.name}: #{light.ip}")
+      end
+    end
+
+    def self.exit_on_failure?
+      true
+    end
+
     private
 
     def scene_class(string)

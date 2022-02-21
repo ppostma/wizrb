@@ -3,13 +3,14 @@
 require 'ipaddr'
 require 'socket'
 require 'json'
+require 'set'
 require_relative 'group'
 require_relative 'products/device'
 
 module Wizrb
   module Shared
     class Discover
-      MULTICAST_ADDR = '224.0.0.1'
+      BROADCAST_ADDR = '255.255.255.255'
       BIND_ADDR = '0.0.0.0'
       PORT = 38_899
       REGISTRATION_MESSAGE = {
@@ -24,17 +25,14 @@ module Wizrb
 
       def initialize(wait: 2)
         @wait = wait
-        @listening = false
-        @thread = nil
         @devices = []
       end
 
       def all(filters: {})
         open_socket
-        listen_registration(filters)
+        listen_registration
         dispatch_registration
-        sleep(@wait)
-        close_registration
+        wait_registration(filters)
         close_socket
         group_devices
       end
@@ -62,36 +60,41 @@ module Wizrb
       private
 
       def open_socket
-        bind_address = IPAddr.new(MULTICAST_ADDR).hton + IPAddr.new(BIND_ADDR).hton
-
         @socket = UDPSocket.open.tap do |socket|
-          socket.setsockopt(:IPPROTO_IP, :IP_ADD_MEMBERSHIP, bind_address)
-          socket.setsockopt(:IPPROTO_IP, :IP_MULTICAST_TTL, 1)
           socket.setsockopt(:SOL_SOCKET, :SO_REUSEPORT, 1)
+          socket.setsockopt(:SOL_SOCKET, :SO_BROADCAST, 1)
         end
       end
 
-      def listen_registration(filters = {})
-        @listening = true
-
+      def listen_registration
         @socket.bind(BIND_ADDR, PORT)
-
-        @thread = Thread.new do
-          while @listening
-            data, addr = @socket.recvfrom(65_536)
-            device = parse_response(data, addr)
-            @devices << device if device && (filters.to_a - device.system_config.to_a).empty?
-          end
-        end
       end
 
       def dispatch_registration
-        @socket.send(REGISTRATION_MESSAGE, 0, MULTICAST_ADDR, PORT)
+        @socket.send(REGISTRATION_MESSAGE, 0, BROADCAST_ADDR, PORT)
+        sleep 0.5
+        @socket.send(REGISTRATION_MESSAGE, 0, BROADCAST_ADDR, PORT)
       end
 
-      def close_registration
-        @listening = false
-        @thread.terminate
+      def wait_registration(filters = {})
+        responses = Set.new
+        loop do
+          ready = @socket.wait_readable(@wait)
+          break if ready.nil?
+
+          response = @socket.recvfrom(65_536)
+          responses << response
+        end
+        @devices = parse_responses(responses, filters)
+      end
+
+      def parse_responses(responses, filters)
+        devices = []
+        responses.each do |data, addr|
+          device = parse_response(data, addr)
+          devices << device if device && (filters.to_a - device.system_config.to_a).empty?
+        end
+        devices
       end
 
       def close_socket
